@@ -6,3 +6,4 @@ dist/
 dist-ssr/
 *.log
 .vercel/
+Vercel Environment Variables/vercel-import.env
