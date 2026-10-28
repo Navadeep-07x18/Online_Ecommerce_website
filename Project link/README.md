@@ -1,48 +1,51 @@
 # Deploy LUXE on Vercel
 
 The repository contains two Vercel projects in one GitHub repository: the Vite
-frontend and the Express API. The API uses MySQL for products, accounts,
-addresses, and orders, so you also need a hosted MySQL database. Vercel does
-not provide a MySQL database with this app.
+frontend and the Express API. The backend uses PostgreSQL. For a new Vercel
+deployment, the Vercel Marketplace's Neon Postgres integration can create and
+connect the database directly.
 
-## 1. Create a hosted MySQL database
+## 1. Create and connect a PostgreSQL database
 
-Create a MySQL database with a provider that accepts connections from Vercel.
-Record its host, port, database name, username, and password. If the provider
-requires TLS, set `DB_SSL` to `true`. For example, TiDB Cloud Starter supports
-MySQL-compatible public connections with required TLS; follow its
-[connection guide](https://docs.pingcap.com/tidbcloud/connect-to-tidb-cluster-serverless/)
-to get the connection details.
+In Vercel, add the **Neon Postgres** integration from the Marketplace and
+create a database. Connect it to the Vercel project whose root directory is
+`Project link/EcomBackend`, enabling the Production environment. The integration
+provides a `DATABASE_URL` connection string to that project.
 
-Vercel Functions do not have fixed outbound IPs by default. Before choosing a
-database firewall rule, check whether your provider and Vercel plan support
-static egress or private connectivity. Avoid opening a production database to
-all IP addresses; if you use a public endpoint, use TLS and a strong,
-dedicated database password.
+Alternatively, create a PostgreSQL database with another hosted provider and
+add its connection string as the `DATABASE_URL` environment variable in the API
+project. Do not use a local XAMPP/MySQL database as the production database;
+this backend now requires PostgreSQL.
+
+Vercel Functions do not have fixed outbound IPs by default. Check whether your
+database provider and Vercel plan support static egress or private connectivity.
+For public connections, enable TLS and use the provider's recommended
+connection-string settings.
 
 ## 2. Deploy the API
 
-In Vercel, import `Navadeep-07x18/Online_Ecommerce_website` as a new project.
-Set its **Root Directory** to `Project link/EcomBackend` and deploy it as an
-Express project. Add these environment variables before deploying:
+Import `Navadeep-07x18/Online_Ecommerce_website` as a new Vercel project. Set
+its **Root Directory** to `Project link/EcomBackend`; Vercel detects the
+Express API. Add these environment variables to the API project's Production
+environment before deploying:
 
 | Variable | Value |
 | --- | --- |
-| `DB_HOST` | Hosted MySQL host |
-| `DB_PORT` | Hosted MySQL port, usually `3306` |
-| `DB_USER` | MySQL username |
-| `DB_PASSWORD` | MySQL password |
-| `DB_NAME` | MySQL database name |
-| `DB_SSL` | `true` if the provider requires TLS; otherwise `false` |
+| `DATABASE_URL` | PostgreSQL connection string supplied by Neon or your database provider |
 | `TOKEN_SECRET` | A long, random secret |
 | `ADMIN_EMAIL` | Email address for the first admin account |
 | `ADMIN_PASSWORD` | A strong, unique admin password |
 | `CORS_ORIGIN` | The frontend's exact origin, e.g. `https://your-store.vercel.app` |
 
-Do not set `PORT` on Vercel; the platform manages it. Keep database and admin
-credentials and `TOKEN_SECRET` in Vercel environment settings, not in source
-control or any `VITE_` variable. The API initializes its tables and demo
-products when it receives its first request.
+If using a provider other than Neon, its settings can instead be supplied using
+`DB_HOST`, `DB_PORT` (default `5432`), `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+(default `luxe_store`), and `DB_SSL=true` when TLS is required. `DB_POOL_MAX`
+can optionally limit the pool size. Do not set `PORT` on Vercel; the platform
+manages it.
+
+Keep the database URL, admin password, and token secret in Vercel environment
+settings, never in source control or any `VITE_` variable. The API initializes
+its tables and demo products on its first request.
 
 Copy the API deployment origin, such as `https://your-api.vercel.app`.
 
@@ -55,12 +58,12 @@ Import the same GitHub repository as a second Vercel project. Set its
 
 After deployment, set `CORS_ORIGIN` on the API project to the frontend's exact
 Vercel origin (scheme and hostname only, with no trailing slash) and redeploy
-the API. Add the variable to both Vercel projects' Production environments;
-add it to Preview as needed.
+the API. Add the variable to Production, and to Preview if needed.
 
 ## Local development
 
-Create `EcomBackend/.env` from `EcomBackend/.env.example` and set your MySQL
-credentials. Start the API with `npm start` in `EcomBackend`; start the Vite
+Install and run PostgreSQL locally, create the `luxe_store` database, and create
+`EcomBackend/.env` from `.env.example` with your local PostgreSQL connection
+string. Start the API with `npm start` in `EcomBackend`; start the Vite
 frontend with `npm run dev` in `Ecommerce`. Vite proxies `/api` requests to
 `http://127.0.0.1:5000` by default.

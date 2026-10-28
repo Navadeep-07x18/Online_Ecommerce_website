@@ -2,13 +2,13 @@ require('dotenv').config()
 const crypto = require('crypto')
 const express = require('express')
 const cors = require('cors')
-const mysql = require('mysql')
+const { Pool } = require('pg')
 const demoProducts = require('./demo-products')
 
 const app = express()
 const port = Number(process.env.PORT || 5000)
 const tokenSecret = process.env.TOKEN_SECRET || 'local-development-secret-change-me'
-const isProduction = process.env.NODE_ENV === 'production'
+const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL_ENV === 'production'
 const allowedOrigins = String(process.env.CORS_ORIGIN || '')
   .split(',')
   .map((origin) => origin.trim())
@@ -17,17 +17,11 @@ const allowedOrigins = String(process.env.CORS_ORIGIN || '')
 const validateProductionEnvironment = () => {
   if (!isProduction) return
 
-  const requiredVariables = [
-    'DB_HOST',
-    'DB_USER',
-    'DB_PASSWORD',
-    'DB_NAME',
-    'TOKEN_SECRET',
-    'ADMIN_EMAIL',
-    'ADMIN_PASSWORD',
-    'CORS_ORIGIN',
-  ]
+  const requiredVariables = ['TOKEN_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD', 'CORS_ORIGIN']
   const missingVariables = requiredVariables.filter((name) => !process.env[name])
+  if (!process.env.DATABASE_URL) {
+    missingVariables.push(...['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'].filter((name) => !process.env[name]))
+  }
   if (missingVariables.length > 0) {
     throw new Error(`Missing required production environment variables: ${missingVariables.join(', ')}`)
   }
@@ -37,14 +31,17 @@ const validateProductionEnvironment = () => {
   }
 }
 
-const pool = mysql.createPool({
-  connectionLimit: 10,
+const pool = new Pool(process.env.DATABASE_URL ? {
+  connectionString: process.env.DATABASE_URL,
+  max: Number(process.env.DB_POOL_MAX || 5),
+} : {
   host: process.env.DB_HOST || '127.0.0.1',
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || 'root',
+  port: Number(process.env.DB_PORT || 5432),
+  user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'luxe_store',
-  ssl: process.env.DB_SSL === 'true' ? {} : undefined,
+  max: Number(process.env.DB_POOL_MAX || 5),
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
 })
 
 app.use(cors({
@@ -79,48 +76,40 @@ app.use(async (_request, response, next) => {
   }
 })
 
-const query = (sql, values = []) => new Promise((resolve, reject) => {
-  pool.query(sql, values, (error, results) => {
-    if (error) reject(error)
-    else resolve(results)
+const toPostgresQuery = (sql, values) => {
+  const parameters = []
+  let valueIndex = 0
+  const text = sql.replace(/\?/g, () => {
+    const value = values[valueIndex++]
+    if (Array.isArray(value)) {
+      return value.map((item) => {
+        parameters.push(item)
+        return `$${parameters.length}`
+      }).join(', ') || 'NULL'
+    }
+    parameters.push(value)
+    return `$${parameters.length}`
   })
-})
+  return { text, values: parameters }
+}
 
-const getConnection = () => new Promise((resolve, reject) => {
-  pool.getConnection((error, connection) => {
-    if (error) reject(error)
-    else resolve(connection)
-  })
-})
-
-const connectionQuery = (connection, sql, values = []) => new Promise((resolve, reject) => {
-  connection.query(sql, values, (error, results) => {
-    if (error) reject(error)
-    else resolve(results)
-  })
-})
-
-const beginTransaction = (connection) => new Promise((resolve, reject) => {
-  connection.beginTransaction((error) => (error ? reject(error) : resolve()))
-})
-
-const commitTransaction = (connection) => new Promise((resolve, reject) => {
-  connection.commit((error) => (error ? reject(error) : resolve()))
-})
-
-const rollbackTransaction = (connection) => new Promise((resolve) => {
-  connection.rollback(() => resolve())
-})
+const query = async (sql, values = []) => {
+  const result = await pool.query(toPostgresQuery(sql, values))
+  return Object.assign(result.rows, { rowCount: result.rowCount })
+}
 
 const inTransaction = async (work) => {
-  const connection = await getConnection()
+  const connection = await pool.connect()
   try {
-    await beginTransaction(connection)
-    const result = await work((sql, values) => connectionQuery(connection, sql, values))
-    await commitTransaction(connection)
+    await connection.query('BEGIN')
+    const result = await work(async (sql, values = []) => {
+      const queryResult = await connection.query(toPostgresQuery(sql, values))
+      return Object.assign(queryResult.rows, { rowCount: queryResult.rowCount })
+    })
+    await connection.query('COMMIT')
     return result
   } catch (error) {
-    await rollbackTransaction(connection)
+    await connection.query('ROLLBACK')
     throw error
   } finally {
     connection.release()
@@ -128,12 +117,6 @@ const inTransaction = async (work) => {
 }
 
 const createRequestError = (message, status = 400) => Object.assign(new Error(message), { status })
-
-const ensureColumn = async (tableName, columnName, definition) => {
-  const rows = await query(`SELECT COUNT(*) AS count FROM information_schema.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`, [tableName, columnName])
-  if (Number(rows[0].count) === 0) await query(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`)
-}
 
 const normalizeAddress = (address = {}) => ({
   name: String(address.name || '').trim(),
@@ -147,14 +130,14 @@ const normalizeAddress = (address = {}) => ({
 const validateAddress = (address) => Object.values(address).every(Boolean)
 
 const getAddresses = async (userId) => query(`SELECT id, name, phone, line1, city, state,
-  postal_code AS postalCode, is_default AS isDefault
+  postal_code AS "postalCode", is_default AS "isDefault"
   FROM addresses WHERE user_id = ? ORDER BY is_default DESC, created_at DESC, id DESC`, [userId])
 
 const attachOrderItems = async (orders) => {
   if (orders.length === 0) return []
 
   const orderIds = orders.map((order) => order.id)
-  const items = await query(`SELECT order_id AS orderId, product_id AS productId, product_name AS name,
+  const items = await query(`SELECT order_id AS "orderId", product_id AS "productId", product_name AS name,
     category, image_url AS image, unit_price AS price, quantity, line_total AS total
     FROM order_items WHERE order_id IN (?) ORDER BY id ASC`, [orderIds])
   const itemsByOrderId = new Map()
@@ -235,89 +218,80 @@ const requireAuth = (request, response, next) => {
 
 const ensureSchema = async () => {
   await query(`CREATE TABLE IF NOT EXISTS users (
-    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     name VARCHAR(120) NOT NULL,
     email VARCHAR(190) NOT NULL,
     phone VARCHAR(30) NULL,
     password_hash VARCHAR(255) NOT NULL,
-    role ENUM('customer', 'admin') NOT NULL DEFAULT 'customer',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    UNIQUE KEY uq_users_email (email)
-  ) ENGINE=InnoDB`)
+    role VARCHAR(20) NOT NULL DEFAULT 'customer' CHECK (role IN ('customer', 'admin')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_users_email UNIQUE (email)
+  )`)
 
   await query(`CREATE TABLE IF NOT EXISTS products (
-    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     name VARCHAR(180) NOT NULL,
     brand VARCHAR(120) NOT NULL DEFAULT 'LUXE',
     category VARCHAR(80) NOT NULL,
     price DECIMAL(12, 2) NOT NULL,
-    quantity INT UNSIGNED NOT NULL DEFAULT 0,
+    quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
     rating DECIMAL(2, 1) NOT NULL DEFAULT 0,
-    reviews INT UNSIGNED NOT NULL DEFAULT 0,
+    reviews INTEGER NOT NULL DEFAULT 0 CHECK (reviews >= 0),
     tag VARCHAR(80) NOT NULL DEFAULT 'New arrival',
-    image_url LONGTEXT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    KEY idx_products_category (category),
-    KEY idx_products_created_at (created_at)
-  ) ENGINE=InnoDB`)
+    image_url TEXT NULL,
+    description TEXT NULL,
+    specifications TEXT NULL,
+    gallery TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`)
 
-  await ensureColumn('products', 'description', 'description TEXT NULL')
-  await ensureColumn('products', 'specifications', 'specifications LONGTEXT NULL')
-  await ensureColumn('products', 'gallery', 'gallery LONGTEXT NULL')
+  await query('CREATE INDEX IF NOT EXISTS idx_products_category ON products (category)')
+  await query('CREATE INDEX IF NOT EXISTS idx_products_created_at ON products (created_at)')
 
   await query(`CREATE TABLE IF NOT EXISTS addresses (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    user_id INT UNSIGNED NOT NULL,
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     name VARCHAR(120) NOT NULL,
     phone VARCHAR(30) NOT NULL,
     line1 VARCHAR(255) NOT NULL,
     city VARCHAR(120) NOT NULL,
     state VARCHAR(120) NOT NULL,
     postal_code VARCHAR(20) NOT NULL,
-    is_default TINYINT(1) NOT NULL DEFAULT 0,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    KEY idx_addresses_user_default (user_id, is_default),
-    CONSTRAINT fk_addresses_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-  ) ENGINE=InnoDB`)
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`)
+  await query('CREATE INDEX IF NOT EXISTS idx_addresses_user_default ON addresses (user_id, is_default)')
 
   await query(`CREATE TABLE IF NOT EXISTS orders (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    user_id INT UNSIGNED NOT NULL,
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users (id),
     status VARCHAR(30) NOT NULL DEFAULT 'placed',
     total DECIMAL(12, 2) NOT NULL,
-    item_count INT UNSIGNED NOT NULL,
+    item_count INTEGER NOT NULL CHECK (item_count >= 0),
     shipping_name VARCHAR(120) NOT NULL,
     shipping_phone VARCHAR(30) NOT NULL,
     shipping_line1 VARCHAR(255) NOT NULL,
     shipping_city VARCHAR(120) NOT NULL,
     shipping_state VARCHAR(120) NOT NULL,
     shipping_postal_code VARCHAR(20) NOT NULL,
-    admin_seen_at TIMESTAMP NULL DEFAULT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    KEY idx_orders_user_created (user_id, created_at),
-    KEY idx_orders_admin_seen (admin_seen_at, created_at),
-    CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id)
-  ) ENGINE=InnoDB`)
+    admin_seen_at TIMESTAMPTZ NULL DEFAULT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`)
+  await query('CREATE INDEX IF NOT EXISTS idx_orders_user_created ON orders (user_id, created_at)')
+  await query('CREATE INDEX IF NOT EXISTS idx_orders_admin_seen ON orders (admin_seen_at, created_at)')
 
   await query(`CREATE TABLE IF NOT EXISTS order_items (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    order_id BIGINT UNSIGNED NOT NULL,
-    product_id INT UNSIGNED NOT NULL,
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    order_id BIGINT NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products (id),
     product_name VARCHAR(180) NOT NULL,
     category VARCHAR(80) NOT NULL,
-    image_url LONGTEXT NULL,
+    image_url TEXT NULL,
     unit_price DECIMAL(12, 2) NOT NULL,
-    quantity INT UNSIGNED NOT NULL,
-    line_total DECIMAL(12, 2) NOT NULL,
-    PRIMARY KEY (id),
-    KEY idx_order_items_order (order_id),
-    CONSTRAINT fk_order_items_order FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE CASCADE,
-    CONSTRAINT fk_order_items_product FOREIGN KEY (product_id) REFERENCES products (id)
-  ) ENGINE=InnoDB`)
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    line_total DECIMAL(12, 2) NOT NULL
+  )`)
+  await query('CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items (order_id)')
 
   const productCount = await query('SELECT COUNT(*) AS count FROM products')
   if (Number(productCount[0].count) === 0) {
@@ -404,7 +378,7 @@ app.post('/api/auth/register', async (request, response) => {
     const existing = await query('SELECT id FROM users WHERE email = ? LIMIT 1', [email])
     if (existing.length > 0) return response.status(409).json({ message: 'An account with this email already exists.' })
 
-    const result = await query('INSERT INTO users (name, email, phone, password_hash, role) VALUES (?, ?, ?, ?, ?)', [
+    const result = await query('INSERT INTO users (name, email, phone, password_hash, role) VALUES (?, ?, ?, ?, ?) RETURNING id', [
       name,
       email,
       phone || null,
@@ -413,11 +387,11 @@ app.post('/api/auth/register', async (request, response) => {
     ])
     return response.status(201).json({
       message: 'Account created successfully.',
-      token: createToken({ id: result.insertId, email, role: 'customer' }),
-      user: { id: result.insertId, name, email, phone, role: 'customer' },
+      token: createToken({ id: result[0].id, email, role: 'customer' }),
+      user: { id: result[0].id, name, email, phone, role: 'customer' },
     })
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') return response.status(409).json({ message: 'An account with this email already exists.' })
+    if (error.code === '23505') return response.status(409).json({ message: 'An account with this email already exists.' })
     return response.status(500).json({ message: 'Could not create the account.', code: error.code })
   }
 })
@@ -499,11 +473,11 @@ app.post('/api/account/addresses', requireAuth, async (request, response) => {
 
   try {
     await inTransaction(async (transactionQuery) => {
-      const rows = await transactionQuery('SELECT id FROM addresses WHERE user_id = ? AND is_default = 1', [request.user.id])
+      const rows = await transactionQuery('SELECT id FROM addresses WHERE user_id = ? AND is_default = TRUE', [request.user.id])
       const isDefault = Boolean(request.body.isDefault) || rows.length === 0
-      if (isDefault) await transactionQuery('UPDATE addresses SET is_default = 0 WHERE user_id = ?', [request.user.id])
+      if (isDefault) await transactionQuery('UPDATE addresses SET is_default = FALSE WHERE user_id = ?', [request.user.id])
       await transactionQuery(`INSERT INTO addresses (user_id, name, phone, line1, city, state, postal_code, is_default)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [request.user.id, address.name, address.phone, address.line1, address.city, address.state, address.postalCode, isDefault ? 1 : 0])
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [request.user.id, address.name, address.phone, address.line1, address.city, address.state, address.postalCode, isDefault])
     })
     return response.status(201).json({ addresses: await getAddresses(request.user.id) })
   } catch (error) {
@@ -522,14 +496,14 @@ app.patch('/api/account/addresses/:id', requireAuth, async (request, response) =
     const result = await inTransaction(async (transactionQuery) => {
       const addresses = await transactionQuery('SELECT id FROM addresses WHERE id = ? AND user_id = ? FOR UPDATE', [addressId, request.user.id])
       if (addresses.length === 0) throw createRequestError('Address not found.', 404)
-      if (Boolean(request.body.isDefault)) await transactionQuery('UPDATE addresses SET is_default = 0 WHERE user_id = ?', [request.user.id])
+      if (Boolean(request.body.isDefault)) await transactionQuery('UPDATE addresses SET is_default = FALSE WHERE user_id = ?', [request.user.id])
       return transactionQuery(`UPDATE addresses SET name = ?, phone = ?, line1 = ?, city = ?, state = ?, postal_code = ?,
-        is_default = CASE WHEN ? THEN 1 ELSE is_default END WHERE id = ? AND user_id = ?`, [
+        is_default = CASE WHEN ? THEN TRUE ELSE is_default END WHERE id = ? AND user_id = ?`, [
         address.name, address.phone, address.line1, address.city, address.state, address.postalCode,
         Boolean(request.body.isDefault), addressId, request.user.id,
       ])
     })
-    if (result.affectedRows === 0) return response.status(404).json({ message: 'Address not found.' })
+    if (result.rowCount === 0) return response.status(404).json({ message: 'Address not found.' })
     return response.json({ addresses: await getAddresses(request.user.id) })
   } catch (error) {
     if (error.status) return response.status(error.status).json({ message: error.message })
@@ -543,12 +517,12 @@ app.delete('/api/account/addresses/:id', requireAuth, async (request, response) 
 
   try {
     await inTransaction(async (transactionQuery) => {
-      const rows = await transactionQuery('SELECT id, is_default AS isDefault FROM addresses WHERE id = ? AND user_id = ? FOR UPDATE', [addressId, request.user.id])
+      const rows = await transactionQuery('SELECT id, is_default AS "isDefault" FROM addresses WHERE id = ? AND user_id = ? FOR UPDATE', [addressId, request.user.id])
       if (rows.length === 0) throw createRequestError('Address not found.', 404)
       await transactionQuery('DELETE FROM addresses WHERE id = ? AND user_id = ?', [addressId, request.user.id])
       if (rows[0].isDefault) {
         const nextAddress = await transactionQuery('SELECT id FROM addresses WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 1', [request.user.id])
-        if (nextAddress.length > 0) await transactionQuery('UPDATE addresses SET is_default = 1 WHERE id = ?', [nextAddress[0].id])
+        if (nextAddress.length > 0) await transactionQuery('UPDATE addresses SET is_default = TRUE WHERE id = ?', [nextAddress[0].id])
       }
     })
     return response.json({ addresses: await getAddresses(request.user.id) })
@@ -582,18 +556,18 @@ app.get('/api/auth/admin/me', requireAdmin, async (request, response) => {
 app.get('/api/admin/analytics', requireAdmin, async (_request, response) => {
   try {
     const summaryRows = await query(`SELECT
-      COUNT(*) AS totalOrders,
+      COUNT(*) AS "totalOrders",
       COALESCE(SUM(total), 0) AS revenue,
-      COALESCE(SUM(DATE(created_at) = CURDATE()), 0) AS ordersToday,
-      COALESCE(SUM(CASE WHEN DATE(created_at) = CURDATE() THEN total ELSE 0 END), 0) AS revenueToday,
-      COALESCE(SUM(status = 'placed'), 0) AS pendingOrders
+      COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) AS "ordersToday",
+      COALESCE(SUM(CASE WHEN created_at::date = CURRENT_DATE THEN total ELSE 0 END), 0) AS "revenueToday",
+      COUNT(*) FILTER (WHERE status = 'placed') AS "pendingOrders"
       FROM orders WHERE status <> 'cancelled'`)
     const topProducts = await query(`SELECT oi.product_id AS id, oi.product_name AS name, oi.category,
-      MAX(oi.image_url) AS image, SUM(oi.quantity) AS unitsSold, SUM(oi.line_total) AS revenue
+      MAX(oi.image_url) AS image, SUM(oi.quantity) AS "unitsSold", SUM(oi.line_total) AS revenue
       FROM order_items oi INNER JOIN orders o ON o.id = oi.order_id
       WHERE o.status <> 'cancelled'
       GROUP BY oi.product_id, oi.product_name, oi.category
-      ORDER BY unitsSold DESC, revenue DESC LIMIT 5`)
+      ORDER BY "unitsSold" DESC, revenue DESC LIMIT 5`)
     const lowStock = await query(`SELECT id, name, category, quantity, image_url AS image
       FROM products WHERE quantity <= 5 ORDER BY quantity ASC, name ASC LIMIT 5`)
     const summary = summaryRows[0]
@@ -662,7 +636,7 @@ app.post('/api/orders', requireAuth, async (request, response) => {
       const orderResult = await transactionQuery(`INSERT INTO orders (
         user_id, status, total, item_count, shipping_name, shipping_phone, shipping_line1,
         shipping_city, shipping_state, shipping_postal_code
-      ) VALUES (?, 'placed', ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      ) VALUES (?, 'placed', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`, [
         request.user.id,
         total,
         itemCount,
@@ -678,7 +652,7 @@ app.post('/api/orders', requireAuth, async (request, response) => {
         await transactionQuery(`INSERT INTO order_items (
           order_id, product_id, product_name, category, image_url, unit_price, quantity, line_total
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
-          orderResult.insertId,
+          orderResult[0].id,
           item.productId,
           item.name,
           item.category,
@@ -690,11 +664,11 @@ app.post('/api/orders', requireAuth, async (request, response) => {
         await transactionQuery('UPDATE products SET quantity = quantity - ? WHERE id = ?', [item.quantity, item.productId])
       }
 
-      return { orderId: orderResult.insertId, itemCount, items, total }
+      return { orderId: orderResult[0].id, itemCount, items, total }
     })
 
-    const orders = await query(`SELECT id, status, total, item_count AS itemCount, created_at AS createdAt,
-      admin_seen_at AS adminSeenAt FROM orders WHERE id = ?`, [result.orderId])
+    const orders = await query(`SELECT id, status, total, item_count AS "itemCount", created_at AS "createdAt",
+      admin_seen_at AS "adminSeenAt" FROM orders WHERE id = ?`, [result.orderId])
     const [order] = await attachOrderItems(orders)
     return response.status(201).json({ order, inventory: result.items.map((item) => ({ id: item.productId, quantity: item.availableQuantity })) })
   } catch (error) {
@@ -705,7 +679,7 @@ app.post('/api/orders', requireAuth, async (request, response) => {
 
 app.get('/api/orders', requireAuth, async (request, response) => {
   try {
-    const orders = await query(`SELECT id, status, total, item_count AS itemCount, created_at AS createdAt
+    const orders = await query(`SELECT id, status, total, item_count AS "itemCount", created_at AS "createdAt"
       FROM orders WHERE user_id = ? ORDER BY created_at DESC, id DESC`, [request.user.id])
     return response.json({ orders: await attachOrderItems(orders) })
   } catch (error) {
@@ -715,12 +689,12 @@ app.get('/api/orders', requireAuth, async (request, response) => {
 
 app.get('/api/admin/orders', requireAdmin, async (_request, response) => {
   try {
-    const rows = await query(`SELECT o.id, o.status, o.total, o.item_count AS itemCount,
-      o.shipping_name AS shippingName, o.shipping_phone AS shippingPhone,
-      o.shipping_line1 AS shippingLine1, o.shipping_city AS shippingCity,
-      o.shipping_state AS shippingState, o.shipping_postal_code AS shippingPostalCode,
-      o.admin_seen_at AS adminSeenAt, o.created_at AS createdAt,
-      u.name AS customerName, u.email AS customerEmail
+    const rows = await query(`SELECT o.id, o.status, o.total, o.item_count AS "itemCount",
+      o.shipping_name AS "shippingName", o.shipping_phone AS "shippingPhone",
+      o.shipping_line1 AS "shippingLine1", o.shipping_city AS "shippingCity",
+      o.shipping_state AS "shippingState", o.shipping_postal_code AS "shippingPostalCode",
+      o.admin_seen_at AS "adminSeenAt", o.created_at AS "createdAt",
+      u.name AS "customerName", u.email AS "customerEmail"
       FROM orders o INNER JOIN users u ON u.id = o.user_id
       ORDER BY o.created_at DESC, o.id DESC`)
     const orders = rows.map((order) => ({
@@ -743,8 +717,8 @@ app.patch('/api/admin/orders/:id/seen', requireAdmin, async (request, response) 
 
   try {
     const result = await query('UPDATE orders SET admin_seen_at = COALESCE(admin_seen_at, CURRENT_TIMESTAMP) WHERE id = ?', [orderId])
-    if (result.affectedRows === 0) return response.status(404).json({ message: 'Order not found.' })
-    const rows = await query('SELECT admin_seen_at AS adminSeenAt FROM orders WHERE id = ?', [orderId])
+    if (result.rowCount === 0) return response.status(404).json({ message: 'Order not found.' })
+    const rows = await query('SELECT admin_seen_at AS "adminSeenAt" FROM orders WHERE id = ?', [orderId])
     return response.json({ id: orderId, adminSeenAt: rows[0].adminSeenAt })
   } catch (error) {
     return response.status(500).json({ message: 'Could not update order notification.', code: error.code })
@@ -766,9 +740,9 @@ app.post('/api/admin/products', requireAdmin, async (request, response) => {
 
   try {
     const result = await query(`INSERT INTO products (name, brand, category, price, quantity, tag, image_url)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`, [name, brand, category, price, quantity, tag, image || null])
+      VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`, [name, brand, category, price, quantity, tag, image || null])
     const rows = await query(`SELECT id, name, brand, category, price, quantity, rating, reviews, tag,
-      image_url AS image FROM products WHERE id = ?`, [result.insertId])
+      image_url AS image FROM products WHERE id = ?`, [result[0].id])
     return response.status(201).json(rows[0])
   } catch (error) {
     return response.status(500).json({ message: 'Could not add product.', code: error.code })
@@ -785,7 +759,7 @@ app.patch('/api/admin/products/:id/quantity', requireAdmin, async (request, resp
 
   try {
     const result = await query('UPDATE products SET quantity = quantity + ? WHERE id = ?', [quantityToAdd, productId])
-    if (result.affectedRows === 0) return response.status(404).json({ message: 'Product not found.' })
+    if (result.rowCount === 0) return response.status(404).json({ message: 'Product not found.' })
 
     const rows = await query(`SELECT id, name, brand, category, price, quantity, rating, reviews, tag,
       image_url AS image FROM products WHERE id = ?`, [productId])
