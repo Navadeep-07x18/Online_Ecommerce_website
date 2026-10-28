@@ -9,7 +9,16 @@ not provide a MySQL database with this app.
 
 Create a MySQL database with a provider that accepts connections from Vercel.
 Record its host, port, database name, username, and password. If the provider
-requires TLS, set `DB_SSL` to `true`.
+requires TLS, set `DB_SSL` to `true`. For example, TiDB Cloud Starter supports
+MySQL-compatible public connections with required TLS; follow its
+[connection guide](https://docs.pingcap.com/tidbcloud/connect-to-tidb-cluster-serverless/)
+to get the connection details.
+
+Vercel Functions do not have fixed outbound IPs by default. Before choosing a
+database firewall rule, check whether your provider and Vercel plan support
+static egress or private connectivity. Avoid opening a production database to
+all IP addresses; if you use a public endpoint, use TLS and a strong,
+dedicated database password.
 
 ## 2. Deploy the API
 
