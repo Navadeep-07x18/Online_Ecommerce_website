@@ -8,10 +8,34 @@ const demoProducts = require('./demo-products')
 const app = express()
 const port = Number(process.env.PORT || 5000)
 const tokenSecret = process.env.TOKEN_SECRET || 'local-development-secret-change-me'
+const isProduction = process.env.NODE_ENV === 'production'
 const allowedOrigins = String(process.env.CORS_ORIGIN || '')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean)
+
+const validateProductionEnvironment = () => {
+  if (!isProduction) return
+
+  const requiredVariables = [
+    'DB_HOST',
+    'DB_USER',
+    'DB_PASSWORD',
+    'DB_NAME',
+    'TOKEN_SECRET',
+    'ADMIN_EMAIL',
+    'ADMIN_PASSWORD',
+    'CORS_ORIGIN',
+  ]
+  const missingVariables = requiredVariables.filter((name) => !process.env[name])
+  if (missingVariables.length > 0) {
+    throw new Error(`Missing required production environment variables: ${missingVariables.join(', ')}`)
+  }
+
+  if (tokenSecret === 'local-development-secret-change-me') {
+    throw new Error('TOKEN_SECRET must not use the local development fallback in production.')
+  }
+}
 
 const pool = mysql.createPool({
   connectionLimit: 10,
@@ -20,6 +44,7 @@ const pool = mysql.createPool({
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'luxe_store',
+  ssl: process.env.DB_SSL === 'true' ? {} : undefined,
 })
 
 app.use(cors({
@@ -29,6 +54,30 @@ app.use(cors({
   },
 }))
 app.use(express.json({ limit: '8mb' }))
+
+let schemaReady
+const initializeSchema = () => {
+  if (!schemaReady) {
+    schemaReady = Promise.resolve()
+      .then(validateProductionEnvironment)
+      .then(ensureSchema)
+      .catch((error) => {
+        schemaReady = null
+        throw error
+      })
+  }
+  return schemaReady
+}
+
+app.use(async (_request, response, next) => {
+  try {
+    await initializeSchema()
+    return next()
+  } catch (error) {
+    console.error(`Database setup failed: ${error.code || error.message}`)
+    return response.status(503).json({ message: 'The service is temporarily unavailable.' })
+  }
+})
 
 const query = (sql, values = []) => new Promise((resolve, reject) => {
   pool.query(sql, values, (error, results) => {
@@ -748,12 +797,13 @@ app.patch('/api/admin/products/:id/quantity', requireAdmin, async (request, resp
 
 app.use((_request, response) => response.status(404).json({ message: 'Route not found.' }))
 
-app.listen(port, async () => {
-  console.log(`LUXE backend listening on http://127.0.0.1:${port}`)
-  try {
-    await ensureSchema()
-    console.log('Database schema ready.')
-  } catch (error) {
-    console.error(`Database setup failed: ${error.code || error.message}`)
-  }
-})
+if (require.main === module) {
+  app.listen(port, () => {
+    console.log(`LUXE backend listening on http://127.0.0.1:${port}`)
+    initializeSchema()
+      .then(() => console.log('Database schema ready.'))
+      .catch((error) => console.error(`Database setup failed: ${error.code || error.message}`))
+  })
+}
+
+module.exports = app
