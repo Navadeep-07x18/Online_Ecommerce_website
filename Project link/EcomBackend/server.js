@@ -1,7 +1,6 @@
 require('dotenv').config()
 const crypto = require('crypto')
 const express = require('express')
-const cors = require('cors')
 const { Pool } = require('pg')
 const demoProducts = require('./demo-products')
 
@@ -9,17 +8,17 @@ const app = express()
 const port = Number(process.env.PORT || 5000)
 const tokenSecret = process.env.TOKEN_SECRET || 'local-development-secret-change-me'
 const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL_ENV === 'production'
-const allowedOrigins = String(process.env.CORS_ORIGIN || '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean)
+const databaseUrl = process.env.DATABASE_URL
+  || process.env.POSTGRES_URL
+  || process.env.POSTGRES_PRISMA_URL
+  || process.env.SUPABASE_DB_URL
 
 const validateProductionEnvironment = () => {
   if (!isProduction) return
 
-  const requiredVariables = ['TOKEN_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD', 'CORS_ORIGIN']
+  const requiredVariables = ['TOKEN_SECRET', 'ADMIN_EMAIL', 'ADMIN_PASSWORD']
   const missingVariables = requiredVariables.filter((name) => !process.env[name])
-  if (!process.env.DATABASE_URL) {
+  if (!databaseUrl) {
     missingVariables.push(...['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'].filter((name) => !process.env[name]))
   }
   if (missingVariables.length > 0) {
@@ -31,25 +30,19 @@ const validateProductionEnvironment = () => {
   }
 }
 
-const pool = new Pool(process.env.DATABASE_URL ? {
-  connectionString: process.env.DATABASE_URL,
-  max: Number(process.env.DB_POOL_MAX || 5),
+const pool = new Pool(databaseUrl ? {
+  connectionString: databaseUrl,
+  max: Number(process.env.DB_POOL_MAX || 1),
 } : {
   host: process.env.DB_HOST || '127.0.0.1',
   port: Number(process.env.DB_PORT || 5432),
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'luxe_store',
-  max: Number(process.env.DB_POOL_MAX || 5),
+  max: Number(process.env.DB_POOL_MAX || 1),
   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
 })
 
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return callback(null, true)
-    return callback(null, false)
-  },
-}))
 app.use(express.json({ limit: '8mb' }))
 
 let schemaReady

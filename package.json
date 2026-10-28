@@ -1,0 +1,18 @@
+{
+  "name": "luxe-ecommerce",
+  "private": true,
+  "workspaces": [
+    "Project link/Ecommerce",
+    "Project link/EcomBackend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=ecommerce",
+    "dev:api": "npm run start --workspace=ecombackend",
+    "dev:web": "npm run dev --workspace=ecommerce",
+    "lint": "npm run lint --workspace=ecommerce",
+    "test": "npm test --workspace=ecombackend"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
