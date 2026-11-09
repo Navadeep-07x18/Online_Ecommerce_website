@@ -858,7 +858,8 @@ app.post('/api/orders', requireAuth, async (request, response) => {
     const orders = await query(`SELECT id, status, total, subtotal, delivery_charge AS "deliveryCharge", discount,
       payment_method AS "paymentMethod", payment_status AS "paymentStatus",
       delivery_option AS "deliveryOption",
-      estimated_delivery_start AS "estimatedDeliveryStart", estimated_delivery_date AS "estimatedDeliveryDate",
+      TO_CHAR(estimated_delivery_start, 'YYYY-MM-DD') AS "estimatedDeliveryStart",
+      TO_CHAR(estimated_delivery_date, 'YYYY-MM-DD') AS "estimatedDeliveryDate",
       item_count AS "itemCount", created_at AS "createdAt", admin_seen_at AS "adminSeenAt"
       FROM orders WHERE id = ? AND user_id = ?`, [result.orderId, request.user.id])
     const [order] = await attachOrderItems(orders)
@@ -878,7 +879,8 @@ app.get('/api/orders', requireAuth, async (request, response) => {
     const orders = await query(`SELECT id, status, total, subtotal, delivery_charge AS "deliveryCharge", discount,
       payment_method AS "paymentMethod", payment_status AS "paymentStatus",
       delivery_option AS "deliveryOption",
-      estimated_delivery_start AS "estimatedDeliveryStart", estimated_delivery_date AS "estimatedDeliveryDate",
+      TO_CHAR(estimated_delivery_start, 'YYYY-MM-DD') AS "estimatedDeliveryStart",
+      TO_CHAR(estimated_delivery_date, 'YYYY-MM-DD') AS "estimatedDeliveryDate",
       item_count AS "itemCount", created_at AS "createdAt"
       FROM orders WHERE user_id = ? ORDER BY created_at DESC, id DESC`, [request.user.id])
     return response.json({ orders: await attachOrderItems(orders) })
@@ -892,7 +894,8 @@ app.get('/api/admin/orders', requireAdmin, async (_request, response) => {
     const rows = await query(`SELECT o.id, o.status, o.total, o.subtotal, o.delivery_charge AS "deliveryCharge", o.discount,
       o.payment_method AS "paymentMethod", o.payment_status AS "paymentStatus",
       o.delivery_option AS "deliveryOption",
-      o.estimated_delivery_start AS "estimatedDeliveryStart", o.estimated_delivery_date AS "estimatedDeliveryDate",
+      TO_CHAR(o.estimated_delivery_start, 'YYYY-MM-DD') AS "estimatedDeliveryStart",
+      TO_CHAR(o.estimated_delivery_date, 'YYYY-MM-DD') AS "estimatedDeliveryDate",
       o.item_count AS "itemCount",
       o.shipping_name AS "shippingName", o.shipping_phone AS "shippingPhone",
       o.shipping_line1 AS "shippingLine1", o.shipping_city AS "shippingCity",

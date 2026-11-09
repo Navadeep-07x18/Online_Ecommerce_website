@@ -250,9 +250,14 @@ const formatOrderDate = (date) => new Intl.DateTimeFormat('en-IN', {
   timeStyle: 'short',
 }).format(new Date(date))
 
-const formatDeliveryDate = (date) => new Intl.DateTimeFormat('en-IN', {
-  dateStyle: 'medium',
-}).format(new Date(`${date}T12:00:00`))
+const formatDeliveryDate = (date) => {
+  const dateParts = date instanceof Date
+    ? [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()]
+    : /^(\d{4})-(\d{2})-(\d{2})/.exec(String(date))?.slice(1).map(Number)
+  if (!dateParts || dateParts.some((part) => !Number.isInteger(part))) return 'Date unavailable'
+  return new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium' })
+    .format(new Date(dateParts[0], dateParts[1] - 1, dateParts[2], 12))
+}
 
 const formatPaymentMethod = (method) => ({
   UPI: 'UPI',
