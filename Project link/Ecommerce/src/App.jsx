@@ -580,8 +580,8 @@ function CheckoutPage({
             <div className="checkout-section-heading"><div><span>02</span><div><h2>Choose delivery</h2><p>Every order arrives in under seven days.</p></div></div></div>
             <fieldset className="checkout-delivery-options">
               <legend className="sr-only">Delivery speed</legend>
-              <label className={deliveryOption === 'standard' ? 'selected' : ''}><input checked={deliveryOption === 'standard'} name="deliveryOption" onChange={() => setDeliveryOption('standard')} type="radio" /><span><strong>Standard delivery</strong><small>Expected within 2–6 days</small></span><b>{cartSubtotal > 5000 ? 'Complimentary' : formatPrice(99)}</b></label>
-              <label className={deliveryOption === 'flash' ? 'selected' : ''}><input checked={deliveryOption === 'flash'} name="deliveryOption" onChange={() => setDeliveryOption('flash')} type="radio" /><span><strong>Flash delivery</strong><small>Priority handling · Expected within 1–2 days</small></span><b>{formatPrice(149)}</b></label>
+              <label className={deliveryOption === 'standard' ? 'selected' : ''}><input checked={deliveryOption === 'standard'} name="deliveryOption" onChange={() => setDeliveryOption('standard')} type="radio" /><span><strong>Standard delivery</strong><small>{deliveryEstimate?.deliveryOption === 'standard' ? `Expected by ${formatDeliveryDate(deliveryEstimate.expectedDeliveryDate)}` : 'Expected within 2–6 days'}</small></span><b>{cartSubtotal > 5000 ? 'Complimentary' : formatPrice(99)}</b></label>
+              <label className={deliveryOption === 'flash' ? 'selected' : ''}><input checked={deliveryOption === 'flash'} name="deliveryOption" onChange={() => setDeliveryOption('flash')} type="radio" /><span><strong>Flash delivery</strong><small>{deliveryEstimate?.deliveryOption === 'flash' ? `Priority handling · Expected by ${formatDeliveryDate(deliveryEstimate.expectedDeliveryDate)}` : 'Priority handling · Expected within 1–2 days'}</small></span><b>{formatPrice(149)}</b></label>
             </fieldset>
             {deliveryEstimateLoading && <p className="delivery-estimate-pending">Confirming delivery availability…</p>}
             {deliveryEstimate && <p className="delivery-estimate-success"><Icon name="truck" size={17} />Available to {deliveryEstimate.postalCode}. Expected within {deliveryEstimate.minDays}–{deliveryEstimate.maxDays} days</p>}
@@ -1040,6 +1040,7 @@ function App() {
           idempotencyKey,
           paymentMethod,
           deliveryOption,
+          expectedDeliveryDate: currentDeliveryEstimate.expectedDeliveryDate,
         }),
         headers: { Authorization: `Bearer ${customerSession}`, 'Content-Type': 'application/json' },
         method: 'POST',

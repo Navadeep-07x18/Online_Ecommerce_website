@@ -3,7 +3,7 @@ const crypto = require('crypto')
 const express = require('express')
 const { Pool } = require('pg')
 const demoProducts = require('./demo-products')
-const { calculateDeliveryEstimate } = require('./delivery-estimator')
+const { calculateDeliveryEstimate, isExpectedDeliveryDateWithinWindow } = require('./delivery-estimator')
 const { paymentMethods, simulatePayment } = require('./payment-simulator')
 
 const app = express()
@@ -646,6 +646,7 @@ app.post('/api/orders', requireAuth, async (request, response) => {
   const checkoutKey = String(request.body.idempotencyKey || '').trim()
   const paymentMethod = String(request.body.paymentMethod || '').toUpperCase()
   const deliveryOption = String(request.body.deliveryOption || 'standard').toLowerCase()
+  const requestedDeliveryDate = String(request.body.expectedDeliveryDate || '').trim()
   const shippingAddress = {
     name: String(address.name || '').trim(),
     phone: String(address.phone || '').trim(),
@@ -747,6 +748,11 @@ app.post('/api/orders', requireAuth, async (request, response) => {
         discount = Number(existingOrder.discount)
         total = Number(existingOrder.total)
       } else {
+        const expectedDeliveryDate = requestedDeliveryDate || deliveryEstimate.expectedDeliveryDate
+        if (!isExpectedDeliveryDateWithinWindow(expectedDeliveryDate, shippingAddress.postalCode, deliveryOption)) {
+          throw createRequestError('The delivery estimate has expired. Refresh checkout to see an updated date.', 409)
+        }
+
         items = []
         for (const [productId, quantity] of [...quantitiesByProductId.entries()].sort(([firstId], [secondId]) => firstId - secondId)) {
           const products = await transactionQuery(`SELECT id, name, category, price, quantity, image_url AS image
@@ -791,8 +797,8 @@ app.post('/api/orders', requireAuth, async (request, response) => {
           paymentMethod === 'COD' ? 'PENDING' : 'FAILED',
           deliveryOption,
           checkoutKey,
-          deliveryEstimate.estimatedFrom,
-          deliveryEstimate.estimatedTo,
+          expectedDeliveryDate,
+          expectedDeliveryDate,
           shippingAddress.name,
           shippingAddress.phone,
           shippingAddress.line1,

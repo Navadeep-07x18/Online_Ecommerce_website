@@ -37,6 +37,8 @@ const calculateDeliveryEstimate = (postalCode, now = new Date(), option = 'stand
   const daysUntilDelivery = selectedOption.minDays
     + Math.floor(boundedRandom * (selectedOption.maxDays - selectedOption.minDays + 1))
   const expectedDeliveryDate = addCalendarDays(now, daysUntilDelivery)
+  const earliestDeliveryDate = addCalendarDays(now, selectedOption.minDays)
+  const latestDeliveryDate = addCalendarDays(now, selectedOption.maxDays)
 
   return {
     available: true,
@@ -45,10 +47,23 @@ const calculateDeliveryEstimate = (postalCode, now = new Date(), option = 'stand
     deliveryType: selectedOption.label,
     minDays: selectedOption.minDays,
     maxDays: selectedOption.maxDays,
+    earliestDeliveryDate,
+    latestDeliveryDate,
     estimatedFrom: expectedDeliveryDate,
     estimatedTo: expectedDeliveryDate,
     expectedDeliveryDate,
   }
 }
 
-module.exports = { calculateDeliveryEstimate, deliveryConfig }
+const isExpectedDeliveryDateWithinWindow = (date, postalCode, option, now = new Date()) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return false
+  const parsedDate = new Date(`${date}T00:00:00.000Z`)
+  if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date) return false
+
+  const estimate = calculateDeliveryEstimate(postalCode, now, option, () => 0)
+  return estimate.available
+    && date >= estimate.earliestDeliveryDate
+    && date <= estimate.latestDeliveryDate
+}
+
+module.exports = { calculateDeliveryEstimate, deliveryConfig, isExpectedDeliveryDateWithinWindow }
