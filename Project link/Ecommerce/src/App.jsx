@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
@@ -250,6 +250,22 @@ const formatOrderDate = (date) => new Intl.DateTimeFormat('en-IN', {
   timeStyle: 'short',
 }).format(new Date(date))
 
+const formatDeliveryDate = (date) => new Intl.DateTimeFormat('en-IN', {
+  dateStyle: 'medium',
+}).format(new Date(`${date}T12:00:00`))
+
+const formatPaymentMethod = (method) => ({
+  UPI: 'UPI',
+  CREDIT_CARD: 'Credit card',
+  DEBIT_CARD: 'Debit card',
+  COD: 'Cash on delivery',
+}[method] || method || 'Cash on delivery')
+
+const createCheckoutKey = () => globalThis.crypto?.randomUUID?.()
+  || `luxe-${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+const parseApiResponse = (response) => response.json().catch(() => null)
+
 const matchesPriceFilter = (price, filterId) => {
   if (filterId === 'under-2000') return price < 2000
   if (filterId === '2000-5000') return price >= 2000 && price <= 5000
@@ -292,7 +308,7 @@ function ProductCard({ product, onAdd, onView }) {
           <Icon name="heart" size={18} />
           <span className="sr-only">{liked ? 'Remove' : 'Add'} {product.name} {liked ? 'from' : 'to'} wishlist</span>
         </button>
-        <button className="quick-add" onClick={() => onAdd(product)} type="button">Quick add <Icon name="arrow" size={16} /></button>
+        <button className="quick-add" disabled={product.quantity === 0} onClick={() => onAdd(product)} type="button">{product.quantity === 0 ? 'Out of stock' : 'Quick add'} {product.quantity > 0 && <Icon name="arrow" size={16} />}</button>
       </div>
       <div className="product-info">
         <div><h3>{product.name}</h3><p>{product.brand ? `${product.brand} · ` : ''}{product.category}</p></div>
@@ -305,9 +321,13 @@ function ProductCard({ product, onAdd, onView }) {
   )
 }
 
-function ProductDetailPanel({ product, catalog, onAdd, close }) {
+function ProductDetailPanel({ product, catalog, defaultPostalCode, onAdd, close }) {
   const gallery = Array.isArray(product.gallery) && product.gallery.length > 0 ? product.gallery : [product.image]
   const [selectedImage, setSelectedImage] = useState(gallery[0])
+  const [postalCode, setPostalCode] = useState(defaultPostalCode || '')
+  const [deliveryEstimate, setDeliveryEstimate] = useState(null)
+  const [deliveryNotice, setDeliveryNotice] = useState('')
+  const [checkingDelivery, setCheckingDelivery] = useState(false)
   const description = product.description || `${product.name} is a considered ${product.category.toLowerCase()} piece selected for everyday use.`
   const specifications = Array.isArray(product.specifications) && product.specifications.length > 0
     ? product.specifications
@@ -318,12 +338,49 @@ function ProductDetailPanel({ product, catalog, onAdd, close }) {
     ]
   const relatedProducts = catalog.filter((item) => item.category === product.category && item.id !== product.id && item.name !== product.name).slice(0, 3)
 
+  const checkDelivery = async (event) => {
+    event.preventDefault()
+    setCheckingDelivery(true)
+    setDeliveryNotice('')
+    setDeliveryEstimate(null)
+    try {
+      const response = await fetch(`${API_BASE_URL}/delivery/estimate?postalCode=${encodeURIComponent(postalCode)}`)
+      const result = await parseApiResponse(response)
+      if (!result || !response.ok || !result.available) {
+        throw new Error(result?.message || result?.error || 'The delivery service is temporarily unavailable.')
+      }
+      setDeliveryEstimate(result)
+    } catch (error) {
+      setDeliveryNotice(error.message || 'Could not check delivery availability.')
+    } finally {
+      setCheckingDelivery(false)
+    }
+  }
+
   return (
     <div className="product-detail-backdrop" onClick={close}>
       <section aria-label={`${product.name} details`} aria-modal="true" className="product-detail-panel" role="dialog" onClick={(event) => event.stopPropagation()}>
         <button className="icon-button product-detail-close" onClick={close} type="button"><Icon name="close" /><span className="sr-only">Close product details</span></button>
         <div className="product-detail-gallery"><img alt={product.name} src={selectedImage} />{gallery.length > 1 && <div>{gallery.map((image) => <button className={image === selectedImage ? 'active' : ''} key={image} onClick={() => setSelectedImage(image)} type="button"><img alt="" src={image} /></button>)}</div>}</div>
-        <div className="product-detail-copy"><p className="eyebrow">{product.brand || 'LUXE'} · {product.category}</p><h2>{product.name}</h2><div className="product-detail-rating"><span className="star-row"><Icon name="star" size={14} /><Icon name="star" size={14} /><Icon name="star" size={14} /><Icon name="star" size={14} /><Icon name="star" size={14} /></span><strong>{product.rating}</strong><span>{product.reviews} reviews</span></div><strong className="product-detail-price">{formatPrice(product.price)}</strong><p className="product-detail-description">{description}</p><dl className="product-detail-specs">{specifications.map((specification) => <div key={specification.label}><dt>{specification.label}</dt><dd>{specification.value}</dd></div>)}</dl><button className="button button-dark" disabled={product.quantity === 0} onClick={() => onAdd(product)} type="button">{product.quantity === 0 ? 'Out of stock' : 'Add to bag'} <Icon name="arrow" size={17} /></button>{relatedProducts.length > 0 && <div className="related-products"><p className="eyebrow">You may also like</p><div>{relatedProducts.map((item) => <button key={item.id || item.name} onClick={() => onAdd(item)} type="button"><img alt={item.name} src={item.image} /><span>{item.name}</span><strong>{formatPrice(item.price)}</strong></button>)}</div></div>}</div>
+        <div className="product-detail-copy">
+          <p className="eyebrow">{product.brand || 'LUXE'} · {product.category}</p>
+          <h2>{product.name}</h2>
+          <div className="product-detail-rating"><span className="star-row"><Icon name="star" size={14} /><Icon name="star" size={14} /><Icon name="star" size={14} /><Icon name="star" size={14} /><Icon name="star" size={14} /></span><strong>{product.rating}</strong><span>{product.reviews} reviews</span></div>
+          <strong className="product-detail-price">{formatPrice(product.price)}</strong>
+          <p className="product-detail-description">{description}</p>
+          <dl className="product-detail-specs">{specifications.map((specification) => <div key={specification.label}><dt>{specification.label}</dt><dd>{specification.value}</dd></div>)}</dl>
+          <form className="delivery-check" onSubmit={checkDelivery}>
+            <label htmlFor="product-postal-code">Check delivery availability</label>
+            <div>
+              <input id="product-postal-code" inputMode="numeric" maxLength="6" onChange={(event) => { setPostalCode(event.target.value); setDeliveryEstimate(null); setDeliveryNotice('') }} pattern="[0-9]{6}" placeholder="6-digit PIN code" required value={postalCode} />
+              <button className="button button-outline" disabled={checkingDelivery} type="submit">{checkingDelivery ? 'Checking…' : 'Check'}</button>
+            </div>
+            {deliveryEstimate && <p className="delivery-estimate-success"><Icon name="truck" size={17} />Available · Standard delivery within {deliveryEstimate.minDays}–{deliveryEstimate.maxDays} days</p>}
+            {deliveryNotice && <p className="delivery-estimate-error" role="status">{deliveryNotice}</p>}
+          </form>
+          <button className="button button-dark" disabled={product.quantity === 0} onClick={() => onAdd(product)} type="button">{product.quantity === 0 ? 'Out of stock' : 'Add to bag'} <Icon name="arrow" size={17} /></button>
+          {relatedProducts.length > 0 && <div className="related-products"><p className="eyebrow">You may also like</p><div>{relatedProducts.map((item) => <button key={item.id || item.name} onClick={() => onAdd(item)} type="button"><img alt={item.name} src={item.image} /><span>{item.name}</span><strong>{formatPrice(item.price)}</strong></button>)}</div></div>}
+        </div>
       </section>
     </div>
   )
@@ -422,7 +479,7 @@ function AdminDashboard({
             {activeView === 'inventory' && <section className="admin-inventory-view"><div className="admin-view-heading"><div><p className="eyebrow">Catalog management</p><h1>Inventory</h1><p>Search, review, and replenish products stored in your database.</p></div><button className="button button-dark" onClick={startNewProduct} type="button">Add a product <Icon name="arrow" size={17} /></button></div><div className="admin-inventory-toolbar"><input onChange={(event) => setInventoryQuery(event.target.value)} placeholder="Search products" type="search" value={inventoryQuery} /><select onChange={(event) => setInventoryCategory(event.target.value)} value={inventoryCategory}>{departments.map((department) => <option key={department}>{department}</option>)}</select><select onChange={(event) => setInventoryStock(event.target.value)} value={inventoryStock}><option value="all">All stock levels</option><option value="healthy">Healthy stock</option><option value="low">Low stock</option><option value="out">Out of stock</option></select></div><div className="admin-inventory-table"><div className="admin-table-row admin-table-head"><span>Product</span><span>Department</span><span>Price</span><span>Stock</span><span>Action</span></div>{inventoryProducts.length > 0 ? inventoryProducts.map((product) => <div className="admin-table-row" key={product.id || product.name}><div className="admin-table-product"><img alt="" src={product.image} /><strong>{product.name}</strong></div><span>{product.category}</span><span>{formatPrice(product.price)}</span><span className={product.quantity <= 5 ? 'admin-stock-low' : 'admin-stock-ok'}>{product.quantity === 0 ? 'Out of stock' : `${product.quantity} available`}</span><button onClick={() => startRestock(product)} type="button">Increase quantity</button></div>) : <p className="admin-empty-message">No products match these filters.</p>}</div></section>}
 
             {activeView === 'inventory-form' && <section className="admin-form-view"><div className="admin-view-heading"><div><p className="eyebrow">Inventory workspace</p><h1>{adminAction === 'increase' ? 'Replenish inventory' : 'Add a new product'}</h1><p>{adminAction === 'increase' ? 'Add units to a product that already exists in the database.' : 'Create a complete product listing for the storefront.'}</p></div></div><form className="admin-product-form" onSubmit={submitAdminProduct}><fieldset className="admin-action-choice"><legend>Choose an inventory action</legend><label><input checked={adminAction === 'new'} name="adminActionDashboard" onChange={() => { resetAdminFields(); setAdminAction('new') }} type="radio" />Add a new product</label><label><input checked={adminAction === 'increase'} name="adminActionDashboard" onChange={() => { resetAdminFields(); setAdminAction('increase') }} type="radio" />Increase existing quantity</label></fieldset>{adminAction === 'increase' ? <><label>Existing product<select onChange={(event) => setExistingProductId(event.target.value)} required value={existingProductId}><option value="">Choose a saved product</option>{catalog.filter((product) => product.id).sort((a, b) => a.name.localeCompare(b.name)).map((product) => <option key={product.id} value={product.id}>{product.name} · {product.quantity} available</option>)}</select></label><label>Quantity to add<input min="1" onChange={(event) => updateAdminField('quantity', event.target.value)} placeholder="10" required step="1" type="number" value={adminForm.quantity} /></label></> : <><div className="admin-form-grid"><label>Product name<input onChange={(event) => updateAdminField('name', event.target.value)} placeholder="Example: Pixel Pro Phone" required type="text" value={adminForm.name} /></label><label>Brand<input onChange={(event) => updateAdminField('brand', event.target.value)} placeholder="Example: Google" type="text" value={adminForm.brand} /></label></div><div className="admin-form-grid"><label>Department<select onChange={(event) => updateAdminField('category', event.target.value)} value={adminForm.category}>{departments.slice(1).map((department) => <option key={department}>{department}</option>)}</select></label><label>Tag<input onChange={(event) => updateAdminField('tag', event.target.value)} placeholder="New arrival" type="text" value={adminForm.tag} /></label></div><div className="admin-form-grid"><label>Price (₹)<input min="0" onChange={(event) => updateAdminField('price', event.target.value)} placeholder="49999" required step="1" type="number" value={adminForm.price} /></label><label>Quantity<input min="0" onChange={(event) => updateAdminField('quantity', event.target.value)} placeholder="25" required step="1" type="number" value={adminForm.quantity} /></label></div><label>Product picture<input accept="image/*" onChange={handleAdminImage} type="file" /></label>{adminImagePreview && <img alt="New product preview" className="admin-image-preview" src={adminImagePreview} />}</>}<button className="button button-dark admin-form-submit" type="submit">{adminAction === 'increase' ? 'Increase quantity' : 'Add product'} <Icon name="arrow" size={17} /></button></form>{adminNotice && <p className="panel-notice">{adminNotice}</p>}</section>}
-            {activeView === 'orders' && <section className="admin-orders-view"><div className="admin-view-heading"><div><p className="eyebrow">Customer activity</p><h1>Order notifications</h1><p>{unseenOrderCount > 0 ? `${unseenOrderCount} new ${unseenOrderCount === 1 ? 'order is' : 'orders are'} waiting for review.` : 'Review every customer order and its delivery details.'}</p></div><button className="button button-outline" onClick={refreshAdminOrders} type="button">Refresh orders <Icon name="arrow" size={17} /></button></div>{adminOrdersNotice && <p className="panel-notice">{adminOrdersNotice}</p>}{adminOrdersLoading ? <p className="admin-empty-message">Loading orders…</p> : adminOrders.length > 0 ? <div className="admin-order-list">{adminOrders.map((order) => <article className="admin-order-card" key={order.id}><header><div><p>{formatOrderNumber(order.id)}</p><strong>{formatOrderDate(order.createdAt)}</strong></div>{!order.adminSeenAt && <span className="admin-new-order-badge">New order</span>}</header><div className="admin-order-details"><div><span>Customer</span><strong>{order.customer?.name}</strong><small>{order.customer?.email}</small></div><div><span>Delivery</span><strong>{order.shippingName}</strong><small>{order.shippingLine1}, {order.shippingCity}, {order.shippingState} {order.shippingPostalCode}</small></div></div><ul>{order.items.map((item) => <li key={`${order.id}-${item.productId}`}><span>{item.quantity} × {item.name}</span><strong>{formatPrice(item.total)}</strong></li>)}</ul><footer><div><span>{order.itemCount} {order.itemCount === 1 ? 'item' : 'items'} · {order.status}</span><strong>{formatPrice(order.total)}</strong></div>{!order.adminSeenAt && <button onClick={() => markOrderSeen(order.id)} type="button">Mark as seen</button>}</footer></article>)}</div> : <p className="admin-empty-message">No customer orders have been placed yet.</p>}</section>}
+            {activeView === 'orders' && <section className="admin-orders-view"><div className="admin-view-heading"><div><p className="eyebrow">Customer activity</p><h1>Order notifications</h1><p>{unseenOrderCount > 0 ? `${unseenOrderCount} new ${unseenOrderCount === 1 ? 'order is' : 'orders are'} waiting for review.` : 'Review every customer order and its delivery details.'}</p></div><button className="button button-outline" onClick={refreshAdminOrders} type="button">Refresh orders <Icon name="arrow" size={17} /></button></div>{adminOrdersNotice && <p className="panel-notice">{adminOrdersNotice}</p>}{adminOrdersLoading ? <p className="admin-empty-message">Loading orders…</p> : adminOrders.length > 0 ? <div className="admin-order-list">{adminOrders.map((order) => <article className="admin-order-card" key={order.id}><header><div><p>{formatOrderNumber(order.id)}</p><strong>{formatOrderDate(order.createdAt)}</strong></div>{!order.adminSeenAt && <span className="admin-new-order-badge">New order</span>}</header><div className="admin-order-details"><div><span>Customer</span><strong>{order.customer?.name}</strong><small>{order.customer?.email}</small></div><div><span>Delivery address</span><strong>{order.shippingName}</strong><small>{order.shippingLine1}, {order.shippingCity}, {order.shippingState} {order.shippingPostalCode}</small><small>{order.deliveryOption === 'flash' ? 'Flash delivery' : 'Standard delivery'}{order.estimatedDeliveryDate ? ` · Expected by ${formatDeliveryDate(order.estimatedDeliveryDate)}` : ''}</small></div></div><ul>{order.items.map((item) => <li key={`${order.id}-${item.productId}`}><span>{item.quantity} × {item.name}</span><strong>{formatPrice(item.total)}</strong></li>)}</ul><footer><div><span>{order.itemCount} {order.itemCount === 1 ? 'item' : 'items'} · {order.status}</span><strong>{formatPrice(order.total)}</strong></div>{!order.adminSeenAt && <button onClick={() => markOrderSeen(order.id)} type="button">Mark as seen</button>}</footer></article>)}</div> : <p className="admin-empty-message">No customer orders have been placed yet.</p>}</section>}
             {activeView === 'analytics' && <section className="admin-analytics-view"><div className="admin-view-heading"><div><p className="eyebrow">Store performance</p><h1>Analytics</h1><p>Monitor revenue, sales activity, best sellers, and products that need restocking.</p></div><button className="button button-outline" onClick={refreshAnalytics} type="button">Refresh analytics <Icon name="arrow" size={17} /></button></div>{analyticsNotice && <p className="panel-notice">{analyticsNotice}</p>}{analyticsLoading ? <p className="admin-empty-message">Loading analytics…</p> : <><div className="admin-stat-grid analytics-stat-grid"><article><span>Total revenue</span><strong>{formatPrice(analyticsSummary.revenue)}</strong><small>All completed store activity</small></article><article><span>Orders today</span><strong>{analyticsSummary.ordersToday}</strong><small>{formatPrice(analyticsSummary.revenueToday)} today</small></article><article><span>Total orders</span><strong>{analyticsSummary.totalOrders}</strong><small>{analyticsSummary.pendingOrders} awaiting fulfilment</small></article><article><span>Low stock</span><strong>{analytics.lowStock?.length || 0}</strong><small>Products with 5 or fewer units</small></article></div><div className="admin-overview-grid"><section className="admin-card"><div className="admin-card-heading"><div><p className="eyebrow">Sales leaders</p><h3>Top products</h3></div></div>{analytics.topProducts?.length > 0 ? <div className="analytics-product-list">{analytics.topProducts.map((product) => <div key={product.id}><img alt="" src={product.image} /><div><strong>{product.name}</strong><span>{product.unitsSold} sold · {formatPrice(product.revenue)}</span></div></div>)}</div> : <p className="admin-empty-message">Sales data will appear after the first order.</p>}</section><section className="admin-card"><div className="admin-card-heading"><div><p className="eyebrow">Inventory watch</p><h3>Low-stock alerts</h3></div></div>{analytics.lowStock?.length > 0 ? <div className="analytics-product-list">{analytics.lowStock.map((product) => <div key={product.id}><img alt="" src={product.image} /><div><strong>{product.name}</strong><span>{product.quantity === 0 ? 'Out of stock' : `${product.quantity} left`} · {product.category}</span></div></div>)}</div> : <p className="admin-empty-message">Everything is stocked well right now.</p>}</section></div></>}</section>}
           </main>
         </div>
@@ -438,9 +495,115 @@ function OrderHistoryPanel({ orders, loading, notice, refresh, close }) {
         <div className="panel-header"><div><p className="eyebrow">Your LUXE account</p><h2>Order history</h2></div><button className="icon-button" onClick={close} type="button"><Icon name="close" /><span className="sr-only">Close order history</span></button></div>
         <div className="order-history-actions"><p>All orders placed with this account are saved here.</p><button className="text-link" onClick={refresh} type="button">Refresh <Icon name="arrow" size={15} /></button></div>
         {notice && <p className="panel-notice">{notice}</p>}
-        {loading ? <p className="admin-empty-message">Loading your orders…</p> : orders.length > 0 ? <div className="customer-order-list">{orders.map((order) => <article className="customer-order-card" key={order.id}><header><div><p>{formatOrderNumber(order.id)}</p><strong>{formatOrderDate(order.createdAt)}</strong></div><span>{order.status}</span></header><div className="customer-order-items">{order.items.map((item) => <div key={`${order.id}-${item.productId}`}><img alt="" src={item.image} /><div><strong>{item.quantity} × {item.name}</strong><small>{formatPrice(item.total)}</small></div></div>)}</div><footer><span>{order.itemCount} {order.itemCount === 1 ? 'item' : 'items'}</span><strong>{formatPrice(order.total)}</strong></footer></article>)}</div> : <div className="drawer-empty"><span className="drawer-empty-icon"><Icon name="bag" size={28} /></span><h3>No orders yet.</h3><p>When you check out, your order will appear here.</p><button className="button button-outline" onClick={close} type="button">Continue shopping</button></div>}
+        {loading ? <p className="admin-empty-message">Loading your orders…</p> : orders.length > 0 ? <div className="customer-order-list">{orders.map((order) => <article className="customer-order-card" key={order.id}><header><div><p>{formatOrderNumber(order.id)}</p><strong>{formatOrderDate(order.createdAt)}</strong></div><span>{order.status.replace('_', ' ')}</span></header><div className="customer-order-items">{order.items.map((item) => <div key={`${order.id}-${item.productId}`}><img alt="" src={item.image} /><div><strong>{item.quantity} × {item.name}</strong><small>{formatPrice(item.total)}</small></div></div>)}</div><div className="order-delivery-summary">{order.estimatedDeliveryDate && <p><Icon name="truck" size={16} />{order.deliveryOption === 'flash' ? 'Flash delivery' : 'Standard delivery'} · Expected by {formatDeliveryDate(order.estimatedDeliveryDate)}</p>}<p>Payment: {formatPaymentMethod(order.paymentMethod)} · {order.paymentStatus || 'PENDING'}</p>{order.payment?.transactionReference && <p>Transaction reference: {order.payment.transactionReference}</p>}<div><span>Subtotal</span><strong>{formatPrice(order.subtotal ?? order.total)}</strong></div><div><span>Delivery</span><strong>{formatPrice(order.deliveryCharge || 0)}</strong></div><div><span>Discount</span><strong>−{formatPrice(order.discount || 0)}</strong></div></div><footer><span>{order.itemCount} {order.itemCount === 1 ? 'item' : 'items'}</span><strong>{formatPrice(order.total)}</strong></footer></article>)}</div> : <div className="drawer-empty"><span className="drawer-empty-icon"><Icon name="bag" size={28} /></span><h3>No orders yet.</h3><p>When you check out, your order will appear here.</p><button className="button button-outline" onClick={close} type="button">Continue shopping</button></div>}
       </aside>
     </div>
+  )
+}
+
+function CheckoutPage({
+  address,
+  cart,
+  cartDiscount,
+  cartDeliveryCharge,
+  cartSubtotal,
+  cartTotal,
+  checkoutNotice,
+  checkoutResult,
+  deliveryEstimate,
+  deliveryEstimateLoading,
+  deliveryEstimateNotice,
+  deliveryOption,
+  isPlacingOrder,
+  onChangeAddress,
+  onClose,
+  onContinue,
+  onOpenOrders,
+  onPlaceOrder,
+  paymentMethod,
+  setDeliveryOption,
+  setPaymentMethod,
+}) {
+  if (checkoutResult?.status === 'success') {
+    const order = checkoutResult.order
+    return (
+      <section aria-label="Order confirmation" className="checkout-page">
+        <div className="checkout-page-header"><a className="wordmark" href="#top">LUXE<span className="wordmark-mark">/</span></a><span><Icon name="shield" size={16} />Secure order confirmation</span></div>
+        <div className="checkout-confirmation">
+          <span className="checkout-outcome-icon"><Icon name="shield" size={26} /></span>
+          <p className="eyebrow">Order confirmed</p>
+          <h1>Thank you for your order.</h1>
+          <p>Order <strong>{formatOrderNumber(order.id)}</strong> is confirmed. {checkoutResult.payment?.status === 'PENDING' ? 'Payment is due on delivery.' : 'Payment authorization is complete.'}</p>
+          {order.estimatedDeliveryDate && <div className="checkout-confirmation-delivery"><Icon name="truck" size={20} /><span><small>{order.deliveryOption === 'flash' ? 'Flash delivery · Expected by' : 'Standard delivery · Expected by'}</small><strong>{formatDeliveryDate(order.estimatedDeliveryDate)}</strong></span></div>}
+          {checkoutResult.payment?.transactionReference && <p className="checkout-transaction">Transaction reference <strong>{checkoutResult.payment.transactionReference}</strong></p>}
+          <p className="checkout-disclaimer">No financial credentials were collected and no real funds were moved.</p>
+          <div className="checkout-confirmation-actions"><button className="button button-dark" onClick={onOpenOrders} type="button">View order history <Icon name="arrow" size={17} /></button><button className="button button-outline" onClick={onContinue} type="button">Continue shopping</button></div>
+        </div>
+      </section>
+    )
+  }
+
+  if (checkoutResult?.status === 'failed') {
+    return (
+      <section aria-label="Payment status" className="checkout-page">
+        <div className="checkout-page-header"><a className="wordmark" href="#top">LUXE<span className="wordmark-mark">/</span></a><span><Icon name="shield" size={16} />Secure checkout</span></div>
+        <div className="checkout-confirmation checkout-payment-failed" role="alert">
+          <span className="checkout-outcome-icon"><Icon name="close" size={25} /></span>
+          <p className="eyebrow">Authorization not completed</p>
+          <h1>Your order is not yet confirmed.</h1>
+          <p>No funds were charged. You can securely retry the authorization or choose another payment method.</p>
+          {checkoutResult.payment?.transactionReference && <p className="checkout-transaction">Attempt reference <strong>{checkoutResult.payment.transactionReference}</strong></p>}
+          {checkoutNotice && <p className="panel-notice">{checkoutNotice}</p>}
+          <button className="button button-dark" disabled={isPlacingOrder} onClick={onPlaceOrder} type="button">{isPlacingOrder ? 'Processing…' : 'Retry authorization'} <Icon name="arrow" size={17} /></button>
+          <button className="button button-outline" onClick={onClose} type="button">Return to bag</button>
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <section aria-label="Secure checkout" className="checkout-page">
+      <div className="checkout-page-header"><button className="checkout-back-link" onClick={onClose} type="button">← Back to bag</button><a className="wordmark" href="#top">LUXE<span className="wordmark-mark">/</span></a><span><Icon name="shield" size={16} />Secure checkout</span></div>
+      <div className="checkout-page-content">
+        <div className="checkout-page-main">
+          <div className="checkout-page-heading"><p className="eyebrow">Almost yours</p><h1>Complete your order</h1><p>Review delivery and payment before placing your order.</p></div>
+          <section className="checkout-page-section">
+            <div className="checkout-section-heading"><div><span>01</span><div><h2>Delivery address</h2><p>{address ? `${address.city}, ${address.state} ${address.postalCode}` : 'Add an address to continue'}</p></div></div><button onClick={onChangeAddress} type="button">{address ? 'Change' : 'Add address'}</button></div>
+            {address && <p className="checkout-address-detail"><strong>{address.name}</strong><br />{address.line1}<br />{address.city}, {address.state} {address.postalCode}<br />{address.phone}</p>}
+          </section>
+          <section className="checkout-page-section">
+            <div className="checkout-section-heading"><div><span>02</span><div><h2>Choose delivery</h2><p>Every order arrives in under seven days.</p></div></div></div>
+            <fieldset className="checkout-delivery-options">
+              <legend className="sr-only">Delivery speed</legend>
+              <label className={deliveryOption === 'standard' ? 'selected' : ''}><input checked={deliveryOption === 'standard'} name="deliveryOption" onChange={() => setDeliveryOption('standard')} type="radio" /><span><strong>Standard delivery</strong><small>Expected within 2–6 days</small></span><b>{cartSubtotal > 5000 ? 'Complimentary' : formatPrice(99)}</b></label>
+              <label className={deliveryOption === 'flash' ? 'selected' : ''}><input checked={deliveryOption === 'flash'} name="deliveryOption" onChange={() => setDeliveryOption('flash')} type="radio" /><span><strong>Flash delivery</strong><small>Priority handling · Expected within 1–2 days</small></span><b>{formatPrice(149)}</b></label>
+            </fieldset>
+            {deliveryEstimateLoading && <p className="delivery-estimate-pending">Confirming delivery availability…</p>}
+            {deliveryEstimate && <p className="delivery-estimate-success"><Icon name="truck" size={17} />Available to {deliveryEstimate.postalCode}. Expected within {deliveryEstimate.minDays}–{deliveryEstimate.maxDays} days</p>}
+            {deliveryEstimateNotice && <p className="delivery-estimate-error" role="status">{deliveryEstimateNotice}</p>}
+          </section>
+          <section className="checkout-page-section">
+            <div className="checkout-section-heading"><div><span>03</span><div><h2>Payment method</h2><p>Choose how you would like to pay.</p></div></div></div>
+            <fieldset className="checkout-payment-options">
+              <legend className="sr-only">Payment method</legend>
+              <label><input checked={paymentMethod === 'UPI'} name="paymentMethod" onChange={() => setPaymentMethod('UPI')} type="radio" /><span>UPI</span></label>
+              <label><input checked={paymentMethod === 'CREDIT_CARD'} name="paymentMethod" onChange={() => setPaymentMethod('CREDIT_CARD')} type="radio" /><span>Credit card</span></label>
+              <label><input checked={paymentMethod === 'DEBIT_CARD'} name="paymentMethod" onChange={() => setPaymentMethod('DEBIT_CARD')} type="radio" /><span>Debit card</span></label>
+              <label><input checked={paymentMethod === 'COD'} name="paymentMethod" onChange={() => setPaymentMethod('COD')} type="radio" /><span>Cash on delivery</span></label>
+            </fieldset>
+            <p className="checkout-disclaimer">This secure checkout does not collect card or banking credentials. No real funds are charged.</p>
+          </section>
+        </div>
+        <aside className="checkout-order-summary">
+          <p className="eyebrow">Your order</p><h2>Order summary <span>{cart.length} {cart.length === 1 ? 'item' : 'items'}</span></h2>
+          <div className="checkout-summary-items">{cart.map((product, index) => <div key={`${product.id || product.name}-${index}`}><img alt="" src={product.image} /><span><strong>{product.name}</strong><small>{product.category}</small></span><b>{formatPrice(product.price)}</b></div>)}</div>
+          <div className="checkout-total-lines"><div><span>Subtotal</span><strong>{formatPrice(cartSubtotal)}</strong></div><div><span>Delivery</span><strong>{cartDeliveryCharge ? formatPrice(cartDeliveryCharge) : 'Complimentary'}</strong></div><div><span>Discount</span><strong>−{formatPrice(cartDiscount)}</strong></div><div className="checkout-grand-total"><span>Total</span><strong>{formatPrice(cartTotal)}</strong></div></div>
+          {checkoutNotice && <p className="panel-notice" role="alert">{checkoutNotice}</p>}
+          <button className="button button-dark checkout-place-order" disabled={isPlacingOrder || !cart.length || deliveryEstimateLoading || !deliveryEstimate?.available} onClick={onPlaceOrder} type="button">{isPlacingOrder ? <><span className="checkout-spinner" />Processing…</> : paymentMethod === 'COD' ? 'Place order' : 'Authorize securely'} {!isPlacingOrder && <Icon name="arrow" size={17} />}</button>
+          <p className="checkout-summary-terms">By placing your order, you agree to our terms of sale.</p>
+        </aside>
+      </div>
+    </section>
   )
 }
 
@@ -569,6 +732,14 @@ function App() {
   const [ordersNotice, setOrdersNotice] = useState('')
   const [checkoutNotice, setCheckoutNotice] = useState('')
   const [isPlacingOrder, setIsPlacingOrder] = useState(false)
+  const [deliveryEstimate, setDeliveryEstimate] = useState(null)
+  const [deliveryEstimateNotice, setDeliveryEstimateNotice] = useState('')
+  const [deliveryEstimateLoading, setDeliveryEstimateLoading] = useState(false)
+  const [paymentMethod, setPaymentMethod] = useState('UPI')
+  const [deliveryOption, setDeliveryOption] = useState('standard')
+  const [checkoutPageOpen, setCheckoutPageOpen] = useState(false)
+  const [checkoutResult, setCheckoutResult] = useState(null)
+  const checkoutKeyRef = useRef('')
   const [adminAction, setAdminAction] = useState('new')
   const [adminForm, setAdminForm] = useState({ name: '', brand: '', category: 'Tech', price: '', quantity: '', tag: 'New arrival', image: '' })
   const [existingProductId, setExistingProductId] = useState('')
@@ -732,6 +903,36 @@ function App() {
   }, [adminSession, loadAnalytics])
 
   useEffect(() => {
+    if (cart.length === 0 || !savedAddress?.postalCode) return undefined
+
+    const controller = new AbortController()
+    Promise.resolve()
+      .then(() => {
+        if (controller.signal.aborted) return null
+        setDeliveryEstimate(null)
+        setDeliveryEstimateNotice('')
+        setDeliveryEstimateLoading(true)
+        return fetch(`${API_BASE_URL}/delivery/estimate?postalCode=${encodeURIComponent(savedAddress.postalCode)}&deliveryOption=${encodeURIComponent(deliveryOption)}`, { signal: controller.signal })
+      })
+      .then(async (response) => {
+        if (!response) return
+        const result = await parseApiResponse(response)
+        if (!result || !response.ok || !result.available) {
+          throw new Error(result?.message || result?.error || 'The delivery service is temporarily unavailable.')
+        }
+        setDeliveryEstimate(result)
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setDeliveryEstimateNotice(error.message || 'Could not estimate delivery.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDeliveryEstimateLoading(false)
+      })
+
+    return () => controller.abort()
+  }, [cart.length, deliveryOption, savedAddress?.postalCode])
+
+  useEffect(() => {
     fetch(`${API_BASE_URL}/products`)
       .then((response) => (response.ok ? response.json() : []))
       .then((serverProducts) => {
@@ -767,11 +968,27 @@ function App() {
   }
 
   const addToCart = (product) => {
-    setCart((current) => [...current, product])
+    setCheckoutResult(null)
+    checkoutKeyRef.current = ''
+    setCheckoutNotice('')
+    const currentQuantity = cart.filter((item) => product.id ? item.id === product.id : item.name === product.name).length
+    if (currentQuantity >= product.quantity) {
+      setCheckoutNotice(`Only ${product.quantity} ${product.quantity === 1 ? 'unit is' : 'units are'} available.`)
+      setCartOpen(true)
+      return
+    }
+    setCart((current) => {
+      return [...current, product]
+    })
     setCartOpen(true)
   }
 
-  const removeFromCart = (index) => setCart((current) => current.filter((_, itemIndex) => itemIndex !== index))
+  const removeFromCart = (index) => {
+    setCheckoutResult(null)
+    checkoutKeyRef.current = ''
+    setCheckoutNotice('')
+    setCart((current) => current.filter((_, itemIndex) => itemIndex !== index))
+  }
 
   const placeOrder = async () => {
     if (!customerSession) {
@@ -787,6 +1004,14 @@ function App() {
       setPanelOpen('address')
       return
     }
+    if (isDeliveryEstimateLoading) {
+      setCheckoutNotice('Please wait while we calculate delivery for your PIN code.')
+      return
+    }
+    if (!currentDeliveryEstimate?.available) {
+      setCheckoutNotice(deliveryEstimateNotice || 'Enter a serviceable PIN code in your delivery address before checkout.')
+      return
+    }
 
     const quantitiesByProductId = new Map()
     for (const product of cart) {
@@ -799,27 +1024,39 @@ function App() {
 
     setCheckoutNotice('')
     setIsPlacingOrder(true)
+    setCheckoutResult(null)
+    const idempotencyKey = checkoutKeyRef.current || createCheckoutKey()
+    checkoutKeyRef.current = idempotencyKey
     try {
       const response = await fetch(`${API_BASE_URL}/orders`, {
         body: JSON.stringify({
           address: savedAddress,
           items: [...quantitiesByProductId.entries()].map(([productId, quantity]) => ({ productId, quantity })),
+          idempotencyKey,
+          paymentMethod,
+          deliveryOption,
         }),
         headers: { Authorization: `Bearer ${customerSession}`, 'Content-Type': 'application/json' },
         method: 'POST',
       })
-      const result = await response.json()
+      const result = await parseApiResponse(response)
+      if (!result) throw new Error('The server returned an invalid checkout response.')
+      if (result.payment?.status === 'FAILED') {
+        setCheckoutResult({ status: 'failed', order: result.order, payment: result.payment })
+        setCustomerOrders((current) => [result.order, ...current.filter((order) => order.id !== result.order.id)])
+        setCheckoutNotice(result.message || 'Payment authorization was declined. No money was charged.')
+        return
+      }
       if (!response.ok) throw new Error(result.message || 'Could not place your order.')
 
       setCart([])
-      setCartOpen(false)
+      setCheckoutResult({ status: 'success', order: result.order, payment: result.payment })
       setCatalog((current) => current.map((product) => {
         const inventory = result.inventory?.find((item) => item.id === product.id)
         return inventory ? { ...product, quantity: inventory.quantity } : product
       }))
       setCustomerOrders((current) => [result.order, ...current.filter((order) => order.id !== result.order.id)])
       setOrdersNotice(`Order ${formatOrderNumber(result.order.id)} has been placed successfully.`)
-      setPanelOpen('orders')
     } catch (error) {
       setCheckoutNotice(error.message || 'Could not connect to the backend.')
     } finally {
@@ -1103,12 +1340,41 @@ function App() {
   const handleAdminImage = (event) => {
     const file = event.target.files?.[0]
     if (!file) return
+    if (!file.type.startsWith('image/') || file.size > 20 * 1024 * 1024) {
+      setAdminNotice('Choose an image file smaller than 20 MB.')
+      event.target.value = ''
+      return
+    }
+
+    setAdminNotice('')
     const reader = new FileReader()
     reader.onload = () => {
-      const imageData = String(reader.result || '')
-      setAdminImagePreview(imageData)
-      updateAdminField('image', imageData)
+      const image = new Image()
+      image.onload = () => {
+        const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight))
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+        const context = canvas.getContext('2d')
+        if (!context) {
+          setAdminNotice('This image could not be prepared. Choose another image.')
+          return
+        }
+        context.fillStyle = '#ffffff'
+        context.fillRect(0, 0, canvas.width, canvas.height)
+        context.drawImage(image, 0, 0, canvas.width, canvas.height)
+        try {
+          const imageData = canvas.toDataURL('image/jpeg', 0.78)
+          setAdminImagePreview(imageData)
+          updateAdminField('image', imageData)
+        } catch {
+          setAdminNotice('This image could not be prepared. Choose another image.')
+        }
+      }
+      image.onerror = () => setAdminNotice('This image could not be opened. Choose another image.')
+      image.src = String(reader.result || '')
     }
+    reader.onerror = () => setAdminNotice('This image could not be read. Choose another image.')
     reader.readAsDataURL(file)
   }
 
@@ -1130,14 +1396,14 @@ function App() {
           headers: { Authorization: `Bearer ${adminSession}`, 'Content-Type': 'application/json' },
           method: 'PATCH',
         })
-        const result = await response.json()
+        const result = await parseApiResponse(response)
         if (response.status === 401) {
           signOutAdmin()
           setAdminLoginNotice('Your admin session expired. Please sign in again.')
           setPanelOpen('admin-login')
           return
         }
-        if (!response.ok) throw new Error(result.message || 'Could not increase product quantity.')
+        if (!response.ok) throw new Error(result?.message || 'Could not increase product quantity.')
         setCatalog((current) => current.map((product) => product.id === result.id ? normalizeProduct(result) : product))
         setAdminForm((current) => ({ ...current, quantity: '' }))
         setExistingProductId('')
@@ -1172,15 +1438,15 @@ function App() {
         headers: { Authorization: `Bearer ${adminSession}`, 'Content-Type': 'application/json' },
         method: 'POST',
       })
-      const result = await response.json()
+      const result = await parseApiResponse(response)
       if (response.status === 401) {
         signOutAdmin()
         setAdminLoginNotice('Your admin session expired. Please sign in again.')
         setPanelOpen('admin-login')
         return
       }
-      if (!response.ok) throw new Error(result.message || 'Could not add product.')
-      setCatalog((current) => [normalizeProduct(result), ...current.filter((product) => product.name !== result.name)])
+      if (!response.ok) throw new Error(result?.message || 'Could not add product. Check the product details and try again.')
+      setCatalog((current) => [normalizeProduct(result), ...current.filter((product) => product.id !== result.id)])
       resetAdminFields()
       setAdminNotice(`${result.name} was saved to the database with ${result.quantity} available.`)
     } catch (error) {
@@ -1192,6 +1458,14 @@ function App() {
     setMenuOpen(false)
     setSearchOpen(false)
   }
+
+  const cartSubtotal = cart.reduce((total, product) => total + Number(product.price || 0), 0)
+  const cartDeliveryCharge = deliveryOption === 'flash' ? 149 : cartSubtotal > 5000 ? 0 : 99
+  const cartDiscount = 0
+  const cartTotal = cartSubtotal + cartDeliveryCharge - cartDiscount
+  const currentDeliveryEstimate = deliveryEstimate?.postalCode === savedAddress?.postalCode
+    && deliveryEstimate?.deliveryOption === deliveryOption ? deliveryEstimate : null
+  const isDeliveryEstimateLoading = Boolean(cart.length && savedAddress?.postalCode && deliveryEstimateLoading)
 
   return (
     <main className="marketplace-shell">
@@ -1265,7 +1539,7 @@ function App() {
 
         <div className="marketplace-results">
           <div className="results-toolbar"><div><p className="eyebrow">The considered edit</p><h2>{activeCategory === 'All departments' ? 'All pieces' : activeCategory}</h2><span className="results-count">{visibleProducts.length} results{query ? ` for “${query}”` : ''}</span></div><div className="results-controls"><button className="mobile-filter-button" onClick={() => setFiltersOpen(true)} type="button"><Icon name="filter" size={17} />Filters</button><label htmlFor="sort">Sort by<select id="sort" onChange={(event) => setSortBy(event.target.value)} value={sortBy}><option>Featured</option><option>Top rated</option><option>Price: low to high</option><option>Price: high to low</option></select><Icon name="chevron" size={14} /></label><button className="view-button active" type="button"><Icon name="grid" size={18} /><span className="sr-only">Grid view</span></button><button className="view-button" type="button"><Icon name="list" size={18} /><span className="sr-only">List view</span></button></div></div>
-          <div className="product-grid">{visibleProducts.length > 0 ? visibleProducts.map((product) => <ProductCard key={product.name} onAdd={addToCart} onView={setSelectedProduct} product={product} />) : <div className="empty-state"><p>No pieces found for “{query}”.</p><button className="text-link" onClick={() => setQuery('')} type="button">Clear search <Icon name="arrow" size={17} /></button></div>}</div>
+          <div className="product-grid">{visibleProducts.length > 0 ? visibleProducts.map((product) => <ProductCard key={product.id || product.name} onAdd={addToCart} onView={setSelectedProduct} product={product} />) : <div className="empty-state"><p>No pieces found for “{query}”.</p><button className="text-link" onClick={() => setQuery('')} type="button">Clear search <Icon name="arrow" size={17} /></button></div>}</div>
         </div>
       </section>
 
@@ -1289,9 +1563,47 @@ function App() {
 
       {panelOpen === 'admin' && <AdminDashboard catalog={catalog} adminOrders={adminOrders} adminOrdersLoading={adminOrdersLoading} adminOrdersNotice={adminOrdersNotice} refreshAdminOrders={loadAdminOrders} markOrderSeen={markOrderSeen} analytics={analytics} analyticsLoading={analyticsLoading} analyticsNotice={analyticsNotice} refreshAnalytics={loadAnalytics} adminAction={adminAction} setAdminAction={setAdminAction} adminForm={adminForm} updateAdminField={updateAdminField} existingProductId={existingProductId} setExistingProductId={setExistingProductId} adminImagePreview={adminImagePreview} handleAdminImage={handleAdminImage} submitAdminProduct={submitAdminProduct} adminNotice={adminNotice} signOutAdmin={signOutAdmin} close={() => setPanelOpen(null)} resetAdminFields={resetAdminFields} />}
 
-      {selectedProduct && <ProductDetailPanel key={selectedProduct.id || selectedProduct.name} product={selectedProduct} catalog={catalog} onAdd={(product) => { setSelectedProduct(null); addToCart(product) }} close={() => setSelectedProduct(null)} />}
+      {selectedProduct && <ProductDetailPanel key={selectedProduct.id || selectedProduct.name} product={selectedProduct} catalog={catalog} defaultPostalCode={savedAddress?.postalCode || ''} onAdd={(product) => { setSelectedProduct(null); addToCart(product) }} close={() => setSelectedProduct(null)} />}
 
-      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">Your selection</p><h2>Shopping bag <span>({cart.length})</span></h2></div><button className="icon-button" onClick={() => setCartOpen(false)} type="button"><Icon name="close" /><span className="sr-only">Close bag</span></button></div>{cart.length > 0 ? <><div className="drawer-items">{cart.map((product, index) => <div className="drawer-item" key={`${product.name}-${index}`}><img alt={product.name} src={product.image} /><div><strong>{product.name}</strong><span>{product.category}</span><b>{formatPrice(product.price)}</b><button onClick={() => removeFromCart(index)} type="button">Remove</button></div></div>)}</div><div className="drawer-summary"><div><span>Subtotal</span><strong>{formatPrice(cart.reduce((total, product) => total + product.price, 0))}</strong></div><p>Shipping calculated at checkout.</p>{checkoutNotice && <p className="panel-notice">{checkoutNotice}</p>}<button className="button button-dark" disabled={isPlacingOrder} onClick={placeOrder} type="button">{isPlacingOrder ? 'Placing order…' : 'Checkout'} <Icon name="arrow" size={17} /></button></div></> : <div className="drawer-empty"><span className="drawer-empty-icon"><Icon name="bag" size={28} /></span><h3>Your bag is waiting.</h3><p>Add something considered to get started.</p><button className="button button-outline" onClick={() => setCartOpen(false)} type="button">Continue shopping</button></div>}</aside></div>}
+      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}>
+        <aside className="cart-drawer checkout-drawer" onClick={(event) => event.stopPropagation()}>
+          <div className="drawer-header">
+            <div><p className="eyebrow">Your selection</p><h2>Shopping bag <span>({cart.length})</span></h2></div>
+            <button className="icon-button" onClick={() => setCartOpen(false)} type="button"><Icon name="close" /><span className="sr-only">Close bag</span></button>
+          </div>
+          {cart.length > 0 ? <>
+            <div className="drawer-items">{cart.map((product, index) => <div className="drawer-item" key={`${product.id || product.name}-${index}`}><img alt={product.name} src={product.image} /><div><strong>{product.name}</strong><span>{product.category}</span><b>{formatPrice(product.price)}</b><button onClick={() => removeFromCart(index)} type="button">Remove</button></div></div>)}</div>
+            <div className="drawer-summary checkout-summary">
+              <div className="checkout-total-lines"><div><span>Subtotal</span><strong>{formatPrice(cartSubtotal)}</strong></div><div><span>Delivery</span><strong>{cartDeliveryCharge ? formatPrice(cartDeliveryCharge) : 'Complimentary'}</strong></div><div className="checkout-grand-total"><span>Total</span><strong>{formatPrice(cartTotal)}</strong></div></div>
+              {checkoutNotice && <p className="panel-notice" role="status">{checkoutNotice}</p>}
+              <button className="button button-dark" onClick={() => { setCartOpen(false); setCheckoutNotice(''); setCheckoutPageOpen(true) }} type="button">Buy now <Icon name="arrow" size={17} /></button>
+            </div>
+          </> : <div className="drawer-empty"><span className="drawer-empty-icon"><Icon name="bag" size={28} /></span><h3>Your bag is waiting.</h3><p>Add something considered to get started.</p><button className="button button-outline" onClick={() => setCartOpen(false)} type="button">Continue shopping</button></div>}
+        </aside>
+      </div>}
+      {checkoutPageOpen && <CheckoutPage
+        address={savedAddress}
+        cart={cart}
+        cartDiscount={cartDiscount}
+        cartDeliveryCharge={cartDeliveryCharge}
+        cartSubtotal={cartSubtotal}
+        cartTotal={cartTotal}
+        checkoutNotice={checkoutNotice}
+        checkoutResult={checkoutResult}
+        deliveryEstimate={currentDeliveryEstimate}
+        deliveryEstimateLoading={isDeliveryEstimateLoading}
+        deliveryEstimateNotice={deliveryEstimateNotice}
+        deliveryOption={deliveryOption}
+        isPlacingOrder={isPlacingOrder}
+        onChangeAddress={() => { if (customerSession && savedAddress) openProfile(); else startNewAddress() }}
+        onClose={() => { setCheckoutPageOpen(false); setCheckoutResult(null); setCartOpen(true) }}
+        onContinue={() => { setCheckoutPageOpen(false); setCheckoutResult(null) }}
+        onOpenOrders={() => { setCheckoutPageOpen(false); setCheckoutResult(null); setPanelOpen('orders'); void loadCustomerOrders() }}
+        onPlaceOrder={placeOrder}
+        paymentMethod={paymentMethod}
+        setDeliveryOption={setDeliveryOption}
+        setPaymentMethod={setPaymentMethod}
+      />}
     </main>
   )
 }

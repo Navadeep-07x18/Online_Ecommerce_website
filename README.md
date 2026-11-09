@@ -39,6 +39,29 @@ Keep the database URL and admin secrets in Vercel's environment settings, not
 in Git or the browser bundle. Do not use the local XAMPP/phpMyAdmin MySQL
 database: the deployed API uses PostgreSQL.
 
+## Checkout, payments, and delivery
+
+The API initializes the order metadata and `payments` table on startup. For a
+separately managed database, review and apply
+[`Project link/EcomBackend/migrations/20261109_payment_delivery.sql`](./Project%20link/EcomBackend/migrations/20261109_payment_delivery.sql)
+to the PostgreSQL database before deploying the updated API.
+
+Checkout supports UPI, credit/debit cards, and cash on delivery. Online payment
+authorization is simulated: the checkout does not collect financial
+credentials or move funds. COD orders are stored with payment status `PENDING`;
+online authorizations and their references are stored in `payments`. A checkout
+idempotency key prevents duplicate orders on retries or repeat requests.
+
+Customers can select Standard delivery (a randomized expected date 2–6 days
+after ordering) or Flash delivery (1–2 days). The selected option and expected
+date are stored on the order and shown in customer order history and the admin
+orders panel. Delivery estimates are not courier tracking.
+
+No new environment variables are required. Continue keeping the PostgreSQL
+connection string and authentication secrets exclusively in Vercel's backend
+environment; the frontend receives neither the database connection nor a
+service-role key.
+
 ## Local development
 
 Install dependencies once from the repository root:
